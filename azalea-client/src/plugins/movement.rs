@@ -6,15 +6,19 @@ use azalea_core::{
     tick::GameTick,
 };
 use azalea_entity::{
-    Attributes, Crouching, FluidOnEyes, GroundContact, HasClientLoaded, Jumping, LastSentPosition,
-    LocalEntity, LookDirection, MovementResult, OnClimbable, Physics, PlayerAbilities, Pose,
+    ActiveEffects, Attributes, Crouching, FluidOnEyes, GroundContact, HasClientLoaded, Jumping,
+    LastSentPosition, LocalEntity, LookDirection, MovementResult, OnClimbable, Physics, PlayerAbilities, Pose,
+   
     Position,
     dimensions::calculate_dimensions,
     inventory::Inventory,
     metadata::{self, FallFlying, Sprinting, Swimming},
     update_bounding_box, update_dimensions,
 };
-use azalea_inventory::components::{self, EquipmentSlot};
+use azalea_inventory::{
+    ItemStack,
+    components::{self, EquipmentSlot},
+};
 use azalea_physics::{
     PhysicsSystems, TravelSystems, ai_step, client_movement::{ClientMovementState, SprintDirection, WalkDirection}, collision::entity_collisions::{AabbQuery, CollidableEntityQuery, update_last_bounding_box}, fluids::FluidTickSystems, travel::no_collision
 };
@@ -31,7 +35,7 @@ use azalea_protocol::{
         },
     },
 };
-use azalea_registry::builtin::EntityKind;
+use azalea_registry::builtin::{EntityKind, MobEffect};
 use azalea_world::World;
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
@@ -476,6 +480,7 @@ pub fn process_fall_flying_activation(
             &Jumping,
             &Inventory,
             &Physics,
+            &ActiveEffects,
             &OnClimbable,
             &GroundContact,
             &mut FallFlying,
@@ -492,6 +497,7 @@ pub fn process_fall_flying_activation(
         jumping,
         inv,
         physics,
+        active_effects,
         onclimbable,
         ground_contact,
         mut fall_flying,
@@ -504,7 +510,7 @@ pub fn process_fall_flying_activation(
             && !creative_flight_toggled
             && last_sent_input.is_some_and(|input| !input.0.jump)
             && !**onclimbable
-            && can_start_fall_flying(&fall_flying, abilities, inv, physics, ground_contact)
+            && can_start_fall_flying(&fall_flying, abilities, inv, physics, ground_contact, active_effects)
         {
             // split `tryToStartFallFlying` into condition check
             **fall_flying = true; // Player.startFallFlying()
@@ -527,25 +533,42 @@ fn can_start_fall_flying(
     inv: &Inventory,
     physics: &Physics,
     ground_contact: &GroundContact,
+    active_effects: &ActiveEffects,
 ) -> bool {
     (!**already_fall_flying)
         && (!abilities.flying)
 
         // LivingEntity.canGlide()
         && !ground_contact.on_ground()
-        // TODO: && isPassenger()
-        // TODO: slow falling status effect
+        // TODO: && !isPassenger()
+        && !active_effects.0.contains_key(&MobEffect::Levitation)
         && EquipmentSlot::values().iter().any(|slot| {
             inv.get_equipment(*slot).is_some_and(|stack| {
+                // LivingEntity.canGlideUsing()
                 stack.get_component::<components::Glider>().is_some()
                     && stack.get_component::<components::Equippable>().is_some_and(
-                        // TODO: check eltra durability
-                        |equippable| equippable.slot == *slot/* && stack.nextDamageWillBreak() */
+                        |equippable| equippable.slot == *slot
                     )
+                    && !next_damage_will_break(stack)
             })
         })
 
         && !physics.is_in_water()
+}
+
+// ItemStack.nextDamageWillBreak()
+fn next_damage_will_break(stack: &ItemStack) -> bool {
+    let Some(max_damage) = stack.get_component::<components::MaxDamage>() else {
+        return false;
+    };
+    let Some(damage) = stack.get_component::<components::Damage>() else {
+        return false;
+    };
+    // ItemStack.isDamageableItem()
+    if stack.get_component::<components::Unbreakable>().is_some() {
+        return false;
+    }
+    damage.amount >= max_damage.amount - 1
 }
 
 // LocalPlayer.isMovingSlowly
