@@ -1,27 +1,89 @@
-use azalea_block::{
-    BlockState,
-    fluid_state::{FluidKind, FluidState},
-};
+use azalea_block::fluid_state::{FluidKind, FluidState};
 use azalea_core::{
     direction::Direction,
     position::{BlockPos, Vec3},
 };
-use azalea_entity::{HasClientLoaded, LocalEntity, Physics, Position};
+use azalea_entity::{
+    FluidOnEyes, HasClientLoaded, Jumping, LocalEntity, LookDirection, Physics, PlayerAbilities,
+    Position,
+    metadata::{AbstractLiving, Player, Sprinting, Swimming},
+    view_vector,
+};
 use azalea_registry::builtin::BlockKind;
 use azalea_world::{World, WorldName, Worlds};
 use bevy_ecs::prelude::*;
 
-use crate::collision::legacy_blocks_motion;
+use crate::collision::{legacy_blocks_motion, support_type::SupportType};
+
+pub fn update_vertical_momentum_swimming(
+    mut query: Query<
+        (
+            &mut Physics,
+            &LookDirection,
+            &Jumping,
+            &Position,
+            &Swimming,
+            &WorldName,
+        ),
+        (With<LocalEntity>, With<HasClientLoaded>, With<Player>),
+    >,
+    worlds: Res<Worlds>,
+) {
+    for (mut physics, look, jumping, position, swimming, world_name) in &mut query {
+        if !**swimming {
+            continue;
+        }
+
+        let Some(world_lock) = worlds.get(world_name) else {
+            continue;
+        };
+        let world = world_lock.read();
+
+        let angle_y = view_vector(*look).y;
+        let multiplier = if angle_y < -0.2 { 0.085 } else { 0.06 };
+        if angle_y <= 0.0
+            || **jumping
+            || world
+                .get_fluid_state(position.up(1.0 - 0.1).to_block_pos_floor())
+                .is_some()
+        {
+            let y_velocity = physics.velocity.y;
+            physics.velocity += Vec3 {
+                x: 0.0,
+                y: (angle_y - y_velocity) * multiplier,
+                z: 0.0,
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum FluidUpdateTiming {
+    NormalFluidUpdate,
+    PostMovementUpdate,
+}
+
+/// System for running fluid physics (most of the physics anyway)
+#[derive(Clone, Debug, Eq, Hash, PartialEq, SystemSet)]
+pub struct FluidTickSystems;
 
 #[allow(clippy::type_complexity)]
 pub fn update_in_water_state_and_do_fluid_pushing(
+    input: InMut<FluidUpdateTiming>,
     mut query: Query<
-        (&mut Physics, &Position, &WorldName),
+        (&mut Physics, &Position, &WorldName, Option<&AbstractLiving>),
         (With<LocalEntity>, With<HasClientLoaded>),
     >,
     worlds: Res<Worlds>,
 ) {
-    for (mut physics, position, world_name) in &mut query {
+    for (mut physics, position, world_name, living) in &mut query {
+        if *input.0 == FluidUpdateTiming::PostMovementUpdate
+            && (physics.was_touching_water || living.is_none())
+        // only LivingEntity has this override
+        {
+            continue;
+        }
+
         let Some(world_lock) = worlds.get(world_name) else {
             continue;
         };
@@ -121,7 +183,19 @@ fn update_fluid_height_and_do_fluid_pushing(
                 if fluid_at_cur_pos.kind != checking_fluid {
                     continue;
                 }
-                let fluid_max_y = (cur_y as f32 + fluid_at_cur_pos.height()) as f64;
+
+                let fluid_height = {
+                    if world
+                        .get_fluid_state(cur_pos.up(1))
+                        .is_some_and(|fluid| fluid.kind == checking_fluid)
+                    {
+                        1f32
+                    } else {
+                        fluid_at_cur_pos.height()
+                    }
+                };
+
+                let fluid_max_y = (cur_y as f32 + fluid_height) as f64;
                 if fluid_max_y < checking_liquids_aabb.min.y {
                     continue;
                 }
@@ -176,8 +250,47 @@ fn update_fluid_height_and_do_fluid_pushing(
     touching_fluid
 }
 
-pub fn update_swimming() {
-    // TODO: swimming
+pub fn update_swimming(
+    mut query: Query<
+        (
+            &mut Swimming,
+            Option<&PlayerAbilities>,
+            &Sprinting,
+            &Physics,
+            &FluidOnEyes,
+            &Position,
+            &WorldName,
+        ),
+        (With<LocalEntity>, With<HasClientLoaded>),
+    >,
+    worlds: Res<Worlds>,
+) {
+    for (mut swimming, abilities, sprinting, physics, fluid_on_eyes, position, world_name) in
+        &mut query
+    {
+        let Some(world_lock) = worlds.get(world_name) else {
+            continue;
+        };
+
+        let world = world_lock.read();
+
+        let is_passenger = false;
+
+        let keep_swiming = **sprinting
+            && physics.is_in_water()
+            && !is_passenger
+            && abilities.is_none_or(|cap| !cap.flying);
+
+        if **swimming {
+            **swimming = keep_swiming;
+        } else {
+            **swimming = keep_swiming
+                && **fluid_on_eyes == FluidKind::Water
+                && world
+                    .get_fluid_state(position.into())
+                    .is_some_and(|f| f.kind == FluidKind::Water);
+        }
+    }
 }
 
 // FlowingFluid.getFlow
@@ -265,21 +378,6 @@ fn is_solid_face(
     ) {
         return false;
     }
-    is_face_sturdy(block_state, world, adjacent_pos, direction)
-}
-
-fn is_face_sturdy(
-    _block_state: BlockState,
-    _world: &World,
-    _pos: BlockPos,
-    _direction: Direction,
-) -> bool {
-    // TODO: this does a whole bunch of physics shape checks for waterlogged
-    // blocks that i honestly cannot be bothered to implement right now
-
-    // see BlockBehavior.isFaceSturdy in the decompiled minecraft source
-
-    // also, this probably should be in a module other than fluids.rs
-
-    false
+    // is_face_sturdy
+    SupportType::Full.is_supporting(block_state, adjacent_pos, direction)
 }
