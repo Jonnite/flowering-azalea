@@ -110,7 +110,7 @@ impl Hunger {
     /// Note that this doesn't consider our gamemode or passenger status.
     pub fn is_enough_to_sprint(&self) -> bool {
         // hasEnoughFoodToSprint
-        self.food >= 6
+        self.food > 6
     }
 }
 
